@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+# Define os modelos que as fases do dummy usam. Compatível com bash 3.2.
+set -euo pipefail
+
+DUMMY_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CONF_USER="${XDG_CONFIG_HOME:-$HOME/.config}/dummy/models.conf"
+CONF_DEFAULTS="$DUMMY_HOME/config/models.defaults.conf"
+TARGETS="claude codex cursor gemini opencode cline goose aider generic"
+
+usage() {
+  cat <<EOF
+Uso:
+  dummy-models show
+  dummy-models set [--target ALVO] [PRIMARIO SECUNDARIO]
+  dummy-models reset [--target ALVO]
+
+  primário    o modelo mais poderoso: fases de review (review-spec, code-review)
+  secundário  fases de autoria (make-agent-ready, make-spec, implement-issue)
+
+  --target    um de: $TARGETS
+              ou "default" (padrão): vale para todo CLI que não tem valor
+              próprio, nem do usuário nem do repo (ex.: não muda o claude).
+              IDs de modelo são específicos de cada CLI — prefira --target.
+
+  "set" sem modelos pergunta interativamente. O valor "inherit" faz o agent
+  herdar o modelo da sessão. Depois de set/reset os CLIs já instalados são
+  regerados.
+
+Config do usuário: $CONF_USER
+EOF
+}
+
+conf_get() { # arquivo chave
+  [ -f "$1" ] || return 0
+  sed -n "s|^$2=||p" "$1" | tail -1
+}
+
+resolve() { # alvo tier → "valor<TAB>origem"
+  local v
+  v="$(conf_get "$CONF_USER" "$1.$2")";        [ -n "$v" ] && { printf '%s\t%s' "$v" "usuário"; return; }
+  v="$(conf_get "$CONF_DEFAULTS" "$1.$2")";    [ -n "$v" ] && { printf '%s\t%s' "$v" "padrão do repo"; return; }
+  v="$(conf_get "$CONF_USER" "default.$2")";   [ -n "$v" ] && { printf '%s\t%s' "$v" "usuário (default)"; return; }
+  v="$(conf_get "$CONF_DEFAULTS" "default.$2")"; [ -n "$v" ] && { printf '%s\t%s' "$v" "padrão do repo (default)"; return; }
+  printf '%s\t%s' "inherit" "—"
+}
+
+conf_set() { # chave valor
+  mkdir -p "$(dirname "$CONF_USER")"
+  touch "$CONF_USER"
+  local tmp; tmp="$(mktemp)"
+  grep -v "^$1=" "$CONF_USER" > "$tmp" || true
+  printf '%s=%s\n' "$1" "$2" >> "$tmp"
+  mv "$tmp" "$CONF_USER"
+}
+
+conf_unset() { # chave
+  [ -f "$CONF_USER" ] || return 0
+  local tmp; tmp="$(mktemp)"
+  grep -v "^$1=" "$CONF_USER" > "$tmp" || true
+  mv "$tmp" "$CONF_USER"
+}
+
+check_target() {
+  [ "$1" = "default" ] && return 0
+  case " $TARGETS " in *" $1 "*) return 0 ;; esac
+  echo "alvo desconhecido: $1" >&2; exit 2
+}
+
+check_model() {
+  case "$1" in
+    ""|*[[:space:]]*|*"|"*|*"="*|*'"'*) echo "id de modelo inválido: '$1'" >&2; exit 2 ;;
+  esac
+}
+
+show() {
+  printf '%-10s %-34s %-34s\n' "ALVO" "PRIMÁRIO (review)" "SECUNDÁRIO (autoria)"
+  local t p s
+  for t in $TARGETS; do
+    p="$(resolve "$t" primary)"; s="$(resolve "$t" secondary)"
+    printf '%-10s %-34s %-34s\n' "$t" "${p%%	*}" "${s%%	*}"
+  done
+  echo
+  if [ -f "$CONF_USER" ] && [ -s "$CONF_USER" ]; then
+    echo "Definido pelo usuário ($CONF_USER):"; sed 's/^/  /' "$CONF_USER"
+  else
+    echo "Nenhum valor do usuário; usando os padrões de $CONF_DEFAULTS"
+  fi
+}
+
+reapply() {
+  if [ -f "$DUMMY_HOME/.install-state" ]; then
+    echo; echo "Regerando CLIs instalados..."
+    bash "$DUMMY_HOME/scripts/install.sh" --reapply
+  else
+    echo; echo "Nenhum CLI instalado ainda; os modelos valem na próxima instalação (scripts/install.sh)."
+  fi
+}
+
+cmd="${1:-show}"; [ $# -gt 0 ] && shift
+target="default"; args=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --target) target="${2:?--target exige ALVO}"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) args="$args $1"; shift ;;
+  esac
+done
+check_target "$target"
+# shellcheck disable=SC2086
+set -- $args
+
+case "$cmd" in
+  show) show ;;
+  set)
+    if [ $# -eq 2 ]; then
+      primary="$1"; secondary="$2"
+    elif [ $# -eq 0 ] && [ -t 0 ]; then
+      cur_p="$(resolve "$target" primary)"; cur_s="$(resolve "$target" secondary)"
+      printf 'Alvo: %s\n' "$target"
+      printf 'Modelo primário, o mais poderoso — reviews [%s]: ' "${cur_p%%	*}"; read -r primary
+      printf 'Modelo secundário — autoria [%s]: ' "${cur_s%%	*}"; read -r secondary
+      [ -n "$primary" ] || primary="${cur_p%%	*}"
+      [ -n "$secondary" ] || secondary="${cur_s%%	*}"
+    else
+      usage >&2; exit 2
+    fi
+    check_model "$primary"; check_model "$secondary"
+    conf_set "$target.primary" "$primary"
+    conf_set "$target.secondary" "$secondary"
+    echo "[$target] primário=$primary secundário=$secondary (IDs não são validados contra o CLI)"
+    reapply
+    ;;
+  reset)
+    conf_unset "$target.primary"; conf_unset "$target.secondary"
+    echo "[$target] valores do usuário removidos"
+    reapply
+    ;;
+  -h|--help|help) usage ;;
+  *) usage >&2; exit 2 ;;
+esac

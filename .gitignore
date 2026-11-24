@@ -1,0 +1,8 @@
+.DS_Store
+.install-manifest
+.install-state
+dist/
+
+# profiles reais ficam locais; só o modelo é versionado
+profiles/*
+!profiles/example.md
